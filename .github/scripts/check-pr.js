@@ -4,6 +4,7 @@ const CONVENTIONAL = /^(feat|fix|docs|style|refactor|perf|test|build|ci|chore|re
 const ATTRIBUTION = /^(co-authored-by:.*\b(claude|copilot|chatgpt|openai|anthropic|gemini|cursor|codex)\b|.*generated (with|by) .*(claude|copilot|chatgpt|ai\b))/im;
 const SLOP = /\b(comprehensive|robust|seamless(ly)?|leverag(e|es|ing)|delve|holistic|this pr introduces)\b/i;
 const MAX_WORDS = 250;
+const MARKER = '<!-- pr-format-check -->';
 
 function sections(body) {
   const text = body.replace(/<!--[\s\S]*?-->/g, '');
@@ -15,8 +16,9 @@ function sections(body) {
   return found;
 }
 
-function check({ body, files, commits }) {
+function check({ title, body, files, commits }) {
   const problems = [];
+  if (!CONVENTIONAL.test(title)) problems.push(`Use a Conventional Commit PR title ("feat(dylib): …"), got "${title}".`);
   const found = sections(body || '');
   for (const name of SECTIONS) if (!found[name]) problems.push(`Fill in the "## ${name}" section.`);
   for (const item of (found.Checklist || '').match(/^- \[ \] .+$/gm) || []) problems.push(`Tick the checklist: "${item.slice(6)}".`);
@@ -34,6 +36,8 @@ function check({ body, files, commits }) {
     if (!CONVENTIONAL.test(subject)) problems.push(`${sha.slice(0, 7)}: use a Conventional Commit subject ("fix(dylib): …"), got "${subject}".`);
     if (ATTRIBUTION.test(message)) problems.push(`${sha.slice(0, 7)}: remove the AI attribution trailer.`);
   }
+  if (problems.some((p) => /^[0-9a-f]{7}:/.test(p)))
+    problems.push('To fix commit messages: `git rebase -i origin/main`, mark them `reword`, then `git push --force-with-lease`.');
   return problems;
 }
 
@@ -42,8 +46,21 @@ module.exports = async ({ github, context, core }) => {
   const params = { owner: context.repo.owner, repo: context.repo.repo, pull_number: pr.number, per_page: 100 };
   const files = (await github.paginate(github.rest.pulls.listFiles, params)).map((f) => f.filename);
   const commits = (await github.paginate(github.rest.pulls.listCommits, params)).map((c) => ({ sha: c.sha, message: c.commit.message }));
-  const problems = check({ body: pr.body, files, commits });
-  if (problems.length) core.setFailed(problems.map((p) => `- ${p}`).join('\n'));
+  const problems = check({ title: pr.title, body: pr.body, files, commits });
+
+  // One comment per PR, edited in place, removed once everything passes.
+  const issue = { owner: params.owner, repo: params.repo, issue_number: pr.number };
+  const comments = await github.paginate(github.rest.issues.listComments, issue);
+  const existing = comments.find((c) => c.user.type === 'Bot' && c.body.startsWith(MARKER));
+  if (!problems.length) {
+    if (existing) await github.rest.issues.deleteComment({ ...issue, comment_id: existing.id });
+    return;
+  }
+  const list = problems.map((p) => `- ${p}`).join('\n');
+  const body = `${MARKER}\nThis PR doesn't follow [CONTRIBUTING.md](https://github.com/${params.owner}/${params.repo}/blob/main/CONTRIBUTING.md) yet:\n\n${list}\n\nThis comment updates as you push or edit the description.`;
+  if (existing) await github.rest.issues.updateComment({ ...issue, comment_id: existing.id, body });
+  else await github.rest.issues.createComment({ ...issue, body });
+  core.setFailed(list);
 };
 
 module.exports.check = check;

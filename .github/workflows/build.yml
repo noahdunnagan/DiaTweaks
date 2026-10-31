@@ -1,0 +1,16 @@
+name: Build
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  make:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: make
